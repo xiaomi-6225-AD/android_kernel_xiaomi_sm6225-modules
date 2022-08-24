@@ -400,13 +400,13 @@ static int gen7_hwsched_gmu_first_boot(struct adreno_device *adreno_dev)
 	return 0;
 
 err:
+	gen7_gmu_irq_disable(adreno_dev);
+
 	if (device->gmu_fault) {
 		gen7_gmu_suspend(adreno_dev);
 
 		return ret;
 	}
-
-	gen7_gmu_irq_disable(adreno_dev);
 
 clks_gdsc_off:
 	clk_bulk_disable_unprepare(gmu->num_clks, gmu->clks);
@@ -468,13 +468,13 @@ static int gen7_hwsched_gmu_boot(struct adreno_device *adreno_dev)
 
 	return 0;
 err:
+	gen7_gmu_irq_disable(adreno_dev);
+
 	if (device->gmu_fault) {
 		gen7_gmu_suspend(adreno_dev);
 
 		return ret;
 	}
-
-	gen7_gmu_irq_disable(adreno_dev);
 
 clks_gdsc_off:
 	clk_bulk_disable_unprepare(gmu->num_clks, gmu->clks);
@@ -574,6 +574,7 @@ static int gen7_hwsched_gmu_power_off(struct adreno_device *adreno_dev)
 	return ret;
 
 error:
+	gen7_gmu_irq_disable(adreno_dev);
 	gen7_hwsched_hfi_stop(adreno_dev);
 	gen7_gmu_suspend(adreno_dev);
 
@@ -808,6 +809,31 @@ static int gen7_hwsched_first_boot(struct adreno_device *adreno_dev)
 	return 0;
 }
 
+static void reset_preemption_records(struct adreno_device *adreno_dev)
+{
+	struct gen7_hwsched_hfi *hw_hfi = to_gen7_hwsched_hfi(adreno_dev);
+	static struct kgsl_memdesc *preemption_md = NULL;
+	u32 i;
+
+	if (!adreno_is_preemption_enabled(adreno_dev))
+		return;
+
+	if (preemption_md) {
+		memset(preemption_md->hostptr, 0x0, preemption_md->size);
+		return;
+	}
+
+	for (i = 0; i < hw_hfi->mem_alloc_entries; i++) {
+		struct hfi_mem_alloc_desc *desc = &hw_hfi->mem_alloc_table[i].desc;
+
+		if (desc->mem_kind == HFI_MEMKIND_CSW_PRIV_NON_SECURE) {
+			preemption_md = hw_hfi->mem_alloc_table[i].md;
+			memset(preemption_md->hostptr, 0x0, preemption_md->size);
+			return;
+		}
+	}
+}
+
 static int gen7_hwsched_power_off(struct adreno_device *adreno_dev)
 {
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
@@ -865,6 +891,13 @@ no_gx_power:
 	kgsl_pwrscale_sleep(device);
 
 	kgsl_pwrctrl_clear_l3_vote(device);
+
+	/*
+	 * Reset the context records so that CP can start
+	 * at the correct read pointer for BV thread after
+	 * coming out of slumber.
+	 */
+	reset_preemption_records(adreno_dev);
 
 	trace_kgsl_pwr_set_state(device, KGSL_STATE_SLUMBER);
 
@@ -1182,18 +1215,13 @@ int gen7_hwsched_reset(struct adreno_device *adreno_dev)
 	if (!test_bit(GMU_PRIV_GPU_STARTED, &gmu->flags))
 		return 0;
 
-	gen7_hwsched_hfi_stop(adreno_dev);
-
 	gen7_disable_gpu_irq(adreno_dev);
 
-	gen7_gmu_suspend(adreno_dev);
+	gen7_gmu_irq_disable(adreno_dev);
 
-	/*
-	 * In some corner cases, it is possible that GMU put TS_RETIRE
-	 * on the msgq after we have turned off gmu interrupts. Hence,
-	 * drain the queue one last time before we reboot the GMU.
-	 */
-	gen7_hwsched_process_msgq(adreno_dev);
+	gen7_hwsched_hfi_stop(adreno_dev);
+
+	gen7_gmu_suspend(adreno_dev);
 
 	clear_bit(GMU_PRIV_GPU_STARTED, &gmu->flags);
 
