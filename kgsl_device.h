@@ -83,6 +83,7 @@ struct kgsl_context;
 struct kgsl_power_stats;
 struct kgsl_event;
 struct kgsl_snapshot;
+struct kgsl_sync_fence;
 
 struct kgsl_functable {
 	/* Mandatory functions - these functions must be implemented
@@ -169,6 +170,8 @@ struct kgsl_functable {
 		struct kgsl_context *context);
 	/** set_isdb_breakpoint_registers: Program isdb registers to issue break command */
 	void (*set_isdb_breakpoint_registers)(struct kgsl_device *device);
+	/** @create_hw_fence: Create a hardware fence */
+	void (*create_hw_fence)(struct kgsl_device *device, struct kgsl_sync_fence *kfence);
 };
 
 struct kgsl_ioctl {
@@ -596,6 +599,18 @@ static inline void kgsl_regread(struct kgsl_device *device,
 				unsigned int *value)
 {
 	*value = kgsl_regmap_read(&device->regmap, offsetwords);
+}
+
+static inline void kgsl_regread64(struct kgsl_device *device,
+				  u32 offsetwords_lo, u32 offsetwords_hi,
+				  u64 *value)
+{
+	u32 val_lo = 0, val_hi = 0;
+
+	val_lo = kgsl_regmap_read(&device->regmap, offsetwords_lo);
+	val_hi = kgsl_regmap_read(&device->regmap, offsetwords_hi);
+
+	*value = (((u64)val_hi << 32) | val_lo);
 }
 
 static inline void kgsl_regwrite(struct kgsl_device *device,
