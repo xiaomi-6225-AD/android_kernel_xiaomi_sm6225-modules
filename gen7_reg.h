@@ -154,6 +154,18 @@
 #define GEN7_CP_LPAC_ROQ_DBG_DATA        0xb35
 #define GEN7_CP_LPAC_FIFO_DBG_DATA       0xb36
 #define GEN7_CP_LPAC_FIFO_DBG_ADDR       0xb40
+#define GEN7_CP_AQE_ROQ_DBG_ADDR_0       0xba8
+#define GEN7_CP_AQE_ROQ_DBG_ADDR_1       0xba9
+#define GEN7_CP_AQE_ROQ_DBG_DATA_0       0xbac
+#define GEN7_CP_AQE_ROQ_DBG_DATA_1       0xbad
+#define GEN7_CP_AQE_UCODE_DBG_ADDR_0     0xbb0
+#define GEN7_CP_AQE_UCODE_DBG_ADDR_1     0xbb1
+#define GEN7_CP_AQE_UCODE_DBG_DATA_0     0xbb4
+#define GEN7_CP_AQE_UCODE_DBG_DATA_1     0xbb5
+#define GEN7_CP_AQE_STAT_ADDR_0          0xbb8
+#define GEN7_CP_AQE_STAT_ADDR_1          0xbb9
+#define GEN7_CP_AQE_STAT_DATA_0          0xbbc
+#define GEN7_CP_AQE_STAT_DATA_1          0xbbd
 #define GEN7_LPAC_RBBM_STATUS            0x5fe
 
 /* RBBM registers */
@@ -1065,6 +1077,7 @@
 #define GEN7_GMU_ICACHE_CONFIG			0x1f400
 #define GEN7_GMU_DCACHE_CONFIG			0x1f401
 #define GEN7_GMU_SYS_BUS_CONFIG			0x1f40f
+#define GEN7_GMU_CX_MRC_GBIF_QOS_CTRL		0x1f50b
 #define GEN7_GMU_CM3_SYSRESET			0x1f800
 #define GEN7_GMU_CM3_BOOT_CONFIG		0x1f801
 #define GEN7_GMU_CX_GMU_WFI_CONFIG		0x1f802
