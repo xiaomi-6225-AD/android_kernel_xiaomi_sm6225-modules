@@ -666,6 +666,7 @@
 #define GEN7_RBBM_CLOCK_MODE_HLSQ        0x0011b
 #define GEN7_RBBM_CLOCK_DELAY_HLSQ       0x0011c
 #define GEN7_RBBM_CLOCK_HYST_HLSQ        0x0011d
+#define GEN7_RBBM_CGC_GLOBAL_LOAD_CMD    0x0011e
 #define GEN7_RBBM_CLOCK_HYST2_VFD        0x0012f
 #define GEN7_RBBM_CLOCK_MODE_CP          0x00260
 #define GEN7_RBBM_CLOCK_MODE_BV_LRZ      0x00284
@@ -1062,6 +1063,8 @@
 #define GEN7_CX_DBGC_PERF_ATB_DRAIN_CMD                 0x1844a
 #define GEN7_CX_DBGC_ECO_CNTL                           0x18450
 #define GEN7_CX_DBGC_AHB_DBG_CNTL                       0x18451
+#define GEN7_CX_DBGC_TCM_DBG_ADDR                       0x18580
+#define GEN7_CX_DBGC_TCM_DBG_DATA                       0x18581
 
 /* GMU control registers */
 #define GEN7_GMU_CM3_ITCM_START			0x1b400
