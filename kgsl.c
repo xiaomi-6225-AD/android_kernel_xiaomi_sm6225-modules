@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2008-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <uapi/linux/sched/types.h>
@@ -250,15 +250,6 @@ const char *kgsl_context_type(int type)
 	return "ANY";
 }
 
-/* Scheduled by kgsl_mem_entry_put_deferred() */
-static void _deferred_put(struct work_struct *work)
-{
-	struct kgsl_mem_entry *entry =
-		container_of(work, struct kgsl_mem_entry, work);
-
-	kgsl_mem_entry_put(entry);
-}
-
 static struct kgsl_mem_entry *kgsl_mem_entry_create(void)
 {
 	struct kgsl_mem_entry *entry = kzalloc(sizeof(*entry), GFP_KERNEL);
@@ -418,6 +409,24 @@ kgsl_mem_entry_destroy(struct kref *kref)
 	kgsl_sharedmem_free(&entry->memdesc);
 
 	kfree(entry);
+}
+
+/* Scheduled by kgsl_mem_entry_destroy_deferred() */
+static void _deferred_destroy(struct work_struct *work)
+{
+	struct kgsl_mem_entry *entry =
+		container_of(work, struct kgsl_mem_entry, work);
+
+	kgsl_mem_entry_destroy(&entry->refcount);
+}
+
+void kgsl_mem_entry_destroy_deferred(struct kref *kref)
+{
+	struct kgsl_mem_entry *entry =
+		container_of(kref, struct kgsl_mem_entry, refcount);
+
+	INIT_WORK(&entry->work, _deferred_destroy);
+	queue_work(kgsl_driver.lockless_workqueue, &entry->work);
 }
 
 /* Commit the entry to the process so it can be accessed by other operations */
@@ -669,11 +678,11 @@ int kgsl_context_init(struct kgsl_device_private *dev_priv,
 	if (id == -ENOSPC) {
 		/*
 		 * Before declaring that there are no contexts left try
-		 * flushing the event workqueue just in case there are
+		 * flushing the event worker just in case there are
 		 * detached contexts waiting to finish
 		 */
 
-		flush_workqueue(device->events_wq);
+		kthread_flush_worker(device->events_worker);
 		id = _kgsl_get_context_id(device);
 	}
 
@@ -1849,6 +1858,36 @@ static long kgsl_get_gpu_va64_size(struct kgsl_device_private *dev_priv,
 	return 0;
 }
 
+static long kgsl_get_gpu_secure_va_size(struct kgsl_device_private *dev_priv,
+		struct kgsl_device_getproperty *param)
+{
+	u64 size = KGSL_IOMMU_SECURE_SIZE(&dev_priv->device->mmu);
+
+	if (param->sizebytes != sizeof(size))
+		return -EINVAL;
+
+	if (copy_to_user(param->value, &size, sizeof(size)))
+		return -EFAULT;
+
+	return 0;
+}
+
+static long kgsl_get_gpu_secure_va_inuse(struct kgsl_device_private *dev_priv,
+		struct kgsl_device_getproperty *param)
+{
+	u64 val;
+
+	if (param->sizebytes != sizeof(val))
+		return -EINVAL;
+
+	val = atomic_long_read(&kgsl_driver.stats.secure);
+
+	if (copy_to_user(param->value, &val, sizeof(val)))
+		return -EFAULT;
+
+	return 0;
+}
+
 static const struct {
 	int type;
 	long (*func)(struct kgsl_device_private *dev_priv,
@@ -1861,6 +1900,8 @@ static const struct {
 	{ KGSL_PROP_QUERY_CAPABILITIES, kgsl_prop_query_capabilities },
 	{ KGSL_PROP_CONTEXT_PROPERTY, kgsl_get_ctxt_properties },
 	{ KGSL_PROP_GPU_VA64_SIZE, kgsl_get_gpu_va64_size },
+	{ KGSL_PROP_GPU_SECURE_VA_SIZE, kgsl_get_gpu_secure_va_size },
+	{ KGSL_PROP_GPU_SECURE_VA_INUSE, kgsl_get_gpu_secure_va_inuse },
 };
 
 /*call all ioctl sub functions with driver locked*/
@@ -2246,9 +2287,8 @@ long kgsl_ioctl_gpu_aux_command(struct kgsl_device_private *dev_priv,
 	struct kgsl_device *device = dev_priv->device;
 	struct kgsl_context *context;
 	struct kgsl_drawobj **drawobjs;
-	struct kgsl_drawobj_sync *tsobj;
 	void __user *cmdlist;
-	u32 queued, count;
+	u32 count;
 	int i, index = 0;
 	long ret;
 	struct kgsl_gpu_aux_command_generic generic;
@@ -2302,22 +2342,6 @@ long kgsl_ioctl_gpu_aux_command(struct kgsl_device_private *dev_priv,
 			goto err;
 	}
 
-	kgsl_readtimestamp(device, context, KGSL_TIMESTAMP_QUEUED, &queued);
-
-	/*
-	 * Make an implicit sync object for the last queued timestamp on this
-	 * context
-	 */
-	tsobj = kgsl_drawobj_create_timestamp_syncobj(device,
-		context, queued);
-
-	if (IS_ERR(tsobj)) {
-		ret = PTR_ERR(tsobj);
-		goto err;
-	}
-
-	drawobjs[index++] = DRAWOBJ(tsobj);
-
 	cmdlist = u64_to_user_ptr(param->cmdlist);
 
 	/*
@@ -2331,7 +2355,25 @@ long kgsl_ioctl_gpu_aux_command(struct kgsl_device_private *dev_priv,
 	}
 
 	if (generic.type == KGSL_GPU_AUX_COMMAND_BIND) {
+		struct kgsl_drawobj_sync *tsobj;
 		struct kgsl_drawobj_bind *bindobj;
+		u32 queued;
+
+		kgsl_readtimestamp(device, context, KGSL_TIMESTAMP_QUEUED,
+				&queued);
+		/*
+		 * Make an implicit sync object for the last queued timestamp
+		 * on this context
+		 */
+		tsobj = kgsl_drawobj_create_timestamp_syncobj(device,
+			context, queued);
+
+		if (IS_ERR(tsobj)) {
+			ret = PTR_ERR(tsobj);
+			goto err;
+		}
+
+		drawobjs[index++] = DRAWOBJ(tsobj);
 
 		bindobj = kgsl_drawobj_bind_create(device, context);
 
@@ -2348,6 +2390,7 @@ long kgsl_ioctl_gpu_aux_command(struct kgsl_device_private *dev_priv,
 			goto err;
 	} else if (generic.type == KGSL_GPU_AUX_COMMAND_TIMELINE) {
 		struct kgsl_drawobj_timeline *timelineobj;
+		struct kgsl_drawobj_cmd *markerobj;
 
 		timelineobj = kgsl_drawobj_timeline_create(device,
 			context);
@@ -2364,6 +2407,20 @@ long kgsl_ioctl_gpu_aux_command(struct kgsl_device_private *dev_priv,
 		if (ret)
 			goto err;
 
+		/*
+		 * Userspace needs a timestamp to associate with this
+		 * submisssion. Use a marker to keep the timestamp
+		 * bookkeeping correct.
+		 */
+		markerobj = kgsl_drawobj_cmd_create(device, context,
+			KGSL_DRAWOBJ_MARKER, MARKEROBJ_TYPE);
+
+		if (IS_ERR(markerobj)) {
+			ret = PTR_ERR(markerobj);
+			goto err;
+		}
+
+		drawobjs[index++] = DRAWOBJ(markerobj);
 	} else {
 		ret = -EINVAL;
 		goto err;
@@ -2574,7 +2631,7 @@ static void gpumem_free_func(struct kgsl_device *device,
 			entry->memdesc.gpuaddr, entry->memdesc.size,
 			entry->memdesc.flags);
 
-	kgsl_mem_entry_put(entry);
+	kgsl_mem_entry_put_deferred(entry);
 }
 
 static long gpumem_free_entry_on_timestamp(struct kgsl_device *device,
@@ -2671,8 +2728,7 @@ static bool gpuobj_free_fence_func(void *priv)
 			entry->memdesc.gpuaddr, entry->memdesc.size,
 			entry->memdesc.flags);
 
-	INIT_WORK(&entry->work, _deferred_put);
-	queue_work(kgsl_driver.lockless_workqueue, &entry->work);
+	kgsl_mem_entry_put_deferred(entry);
 	return true;
 }
 
@@ -2880,6 +2936,13 @@ static int kgsl_setup_anon_useraddr(struct kgsl_pagetable *pagetable,
 		/* Register the address in the database */
 		ret = kgsl_mmu_set_svm_region(pagetable,
 			(uint64_t) hostptr, (uint64_t) size);
+
+		/* if OOM, retry once after flushing lockless_workqueue */
+		if (ret == -ENOMEM) {
+			flush_workqueue(kgsl_driver.lockless_workqueue);
+			ret = kgsl_mmu_set_svm_region(pagetable,
+				(uint64_t) hostptr, (uint64_t) size);
+		}
 
 		if (ret)
 			return ret;
@@ -4661,6 +4724,11 @@ kgsl_get_unmapped_area(struct file *file, unsigned long addr,
 					       (int) val);
 	} else {
 		val = get_svm_unmapped_area(file, entry, addr, len, flags);
+		/* if OOM, retry once after flushing lockless_workqueue */
+		if (val == -ENOMEM) {
+			flush_workqueue(kgsl_driver.lockless_workqueue);
+			val = get_svm_unmapped_area(file, entry, addr, len, flags);
+		}
 		if (IS_ERR_VALUE(val))
 			dev_err_ratelimited(device->dev,
 					       "_get_svm_area: pid %d addr %lx pgoff %lx len %ld failed error %d\n",
@@ -4979,14 +5047,15 @@ int kgsl_device_platform_probe(struct kgsl_device *device)
 	if (status)
 		goto error;
 
-	device->events_wq = alloc_workqueue("kgsl-events",
-		WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_SYSFS | WQ_HIGHPRI, 0);
+	device->events_worker = kthread_create_worker(0, "kgsl-events");
 
-	if (!device->events_wq) {
-		dev_err(device->dev, "Failed to allocate events workqueue\n");
-		status = -ENOMEM;
+	if (IS_ERR(device->events_worker)) {
+		status = PTR_ERR(device->events_worker);
+		dev_err(device->dev, "Failed to create events worker ret=%d\n", status);
 		goto error_pwrctrl_close;
 	}
+
+	sched_set_fifo(device->events_worker->task);
 
 	/* This can return -EPROBE_DEFER */
 	status = kgsl_mmu_probe(device);
@@ -5020,10 +5089,8 @@ int kgsl_device_platform_probe(struct kgsl_device *device)
 	return 0;
 
 error_pwrctrl_close:
-	if (device->events_wq) {
-		destroy_workqueue(device->events_wq);
-		device->events_wq = NULL;
-	}
+	if (!IS_ERR(device->events_worker))
+		kthread_destroy_worker(device->events_worker);
 
 	kgsl_pwrctrl_close(device);
 error:
@@ -5035,10 +5102,7 @@ void kgsl_device_platform_remove(struct kgsl_device *device)
 {
 	del_timer(&device->work_period_timer);
 
-	if (device->events_wq) {
-		destroy_workqueue(device->events_wq);
-		device->events_wq = NULL;
-	}
+	kthread_destroy_worker(device->events_worker);
 
 	kgsl_device_snapshot_close(device);
 
